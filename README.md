@@ -21,10 +21,4 @@ View the explanation table (with meta-rule flags):
 python hems_with_views.py --show-explain
 
 
-Typical output (for --show-explain):
-
-decided_at | net_grid_kw | mr_sufficient_power_ok | mr_charge_battery_energy_ok | ...
-------------------------------------------------------------------------------------
-2025-10-08T09:55:33Z | 12.5 | 1 | 1 | ...
-
 
