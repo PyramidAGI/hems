@@ -1,4 +1,5 @@
-make a python program that uses the following sqlite. this is a HEMS for efficiently controlling energy usage in a home. insert into rules (ruletype,importance,description,value,unit) values ('grid:connection',0,'max household energy supply',17,'kW');
+make a python program that uses the following sqlite. this is a HEMS for efficiently controlling energy usage in a home. 
+insert into rules (ruletype,importance,description,value,unit) values ('grid:connection',0,'max household energy supply',17,'kW');
 insert into rules (ruletype,importance,description,value,unit) values ('production:solar:min',2,'min solar production for smart stuff',2,'kW');
 insert into rules (ruletype,importance,description,value,unit) values ('state:battery:min',2,'min state of charge',1,'kWh');
 insert into rules (ruletype,importance,description,value,unit) values ('state:battery:max',2,'max state of charge',18,'kWh');
