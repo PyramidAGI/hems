@@ -20,5 +20,9 @@ View the explanation table (with meta-rule flags):
 
 python hems_with_views.py --show-explain
 
+Print the loaded rules:
+
+python hems_with_views.py --print-rules
+
 Tip:
 You can use an Sqlite inspection tool like https://sqlite.org/fiddle/index.html to inspect hems.db
