@@ -1,0 +1,99 @@
+Got it—let’s add two views:
+
+a view that attaches the relevant rule thresholds to every decision
+
+a view that also adds metarule context + applicability flags so you can explain why a decision was taken
+
+You can paste the snippets below into your program (e.g., call create_views(conn) right after init_db(conn)).
+
+1) View: decision_with_rules
+
+This joins each decision with the key rule values (as extra columns).
+It uses constant LEFT JOINs on ruletype (since your rules are global thresholds).
+
+CREATE VIEW IF NOT EXISTS decision_with_rules AS
+SELECT 
+    d.*,
+    r_grid.value         AS grid_limit_kw,
+    r_solar_min.value    AS solar_min_kw,
+    r_bmin.value         AS battery_min_kwh,
+    r_bmax.value         AS battery_max_kwh,
+    r_bpow.value         AS battery_pmax_kw,
+    r_hp_min.value       AS heatpump_min_kw,
+    r_hp_max.value       AS heatpump_max_kw,
+    r_ch_min.value       AS charger_min_kw,
+    r_ch_max.value       AS charger_max_kw,
+    r_tmin.value         AS house_min_c,
+    r_tmax.value         AS house_max_c
+FROM decisions d
+LEFT JOIN rules AS r_grid      ON r_grid.ruletype      = 'grid:connection'
+LEFT JOIN rules AS r_solar_min ON r_solar_min.ruletype = 'production:solar:min'
+LEFT JOIN rules AS r_bmin      ON r_bmin.ruletype      = 'state:battery:min'
+LEFT JOIN rules AS r_bmax      ON r_bmax.ruletype      = 'state:battery:max'
+LEFT JOIN rules AS r_bpow      ON r_bpow.ruletype      = 'consumption:battery:max'
+LEFT JOIN rules AS r_hp_min    ON r_hp_min.ruletype    = 'consumption:heatpump:min'
+LEFT JOIN rules AS r_hp_max    ON r_hp_max.ruletype    = 'consumption:heatpump:max'
+LEFT JOIN rules AS r_ch_min    ON r_ch_min.ruletype    = 'consumption:charger:min'
+LEFT JOIN rules AS r_ch_max    ON r_ch_max.ruletype    = 'consumption:charger:max'
+LEFT JOIN rules AS r_tmin      ON r_tmin.ruletype      = 'state:house:min'
+LEFT JOIN rules AS r_tmax      ON r_tmax.ruletype      = 'state:house:max';
+
+2) View: decision_explain
+
+This builds on the first view and adds:
+
+applicability flags that interpret metarules using the decision values + thresholds
+
+concise metarule texts (via GROUP_CONCAT) so you can show the human-readable logic alongside each row
+
+CREATE VIEW IF NOT EXISTS decision_explain AS
+SELECT
+    dwr.*,
+
+    -- --- Metarule-style applicability flags (1 = applies, 0 = not) ---
+    -- sufficient power (grid headroom)
+    CASE 
+      WHEN dwr.net_grid_kw < dwr.grid_limit_kw THEN 1 ELSE 0
+    END AS mr_sufficient_power_ok,
+
+    -- charge battery 1: energy level inside [min, max) and PV present
+    CASE 
+      WHEN dwr.solar_kw >= dwr.solar_min_kw
+           AND dwr.battery_energy_kwh < dwr.battery_max_kwh
+      THEN 1 ELSE 0
+    END AS mr_charge_battery_energy_ok,
+
+    -- charge battery 2: power limits respected in this decision
+    CASE
+      WHEN ABS(dwr.battery_charge_kw) <= dwr.battery_pmax_kw
+      THEN 1 ELSE 0
+    END AS mr_charge_battery_power_ok,
+
+    -- can charge battery: both grid headroom and battery room exist
+    CASE
+      WHEN dwr.net_grid_kw < dwr.grid_limit_kw
+           AND dwr.battery_energy_kwh < dwr.battery_max_kwh
+      THEN 1 ELSE 0
+    END AS mr_can_charge_battery_ok,
+
+    -- --- Human-readable metarule texts (category bundles) ---
+    (SELECT GROUP_CONCAT(rulename || ': ' || description, ' | ')
+       FROM metarules) AS metarules_all,
+
+    (SELECT GROUP_CONCAT(rulename || ': ' || description, ' | ')
+       FROM metarules WHERE ruletype = 'grid') AS metarules_grid,
+
+    (SELECT GROUP_CONCAT(rulename || ': ' || description, ' | ')
+       FROM metarules WHERE ruletype = 'battery') AS metarules_battery,
+
+    (SELECT GROUP_CONCAT(rulename || ': ' || description, ' | ')
+       FROM metarules WHERE ruletype = 'grid|battery') AS metarules_grid_battery
+
+FROM decision_with_rules AS dwr;
+
+
+Notes:
+
+These flags are interpretations of your metarules using the data you already log.
+
+You can tweak the expressions to mirror your real control logic.
