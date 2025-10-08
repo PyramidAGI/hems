@@ -1,0 +1,56 @@
+make a python program that uses the following sqlite. this is a HEMS for efficiently controlling energy usage in a home. insert into rules (ruletype,importance,description,value,unit) values ('grid:connection',0,'max household energy supply',17,'kW');
+insert into rules (ruletype,importance,description,value,unit) values ('production:solar:min',2,'min solar production for smart stuff',2,'kW');
+insert into rules (ruletype,importance,description,value,unit) values ('state:battery:min',2,'min state of charge',1,'kWh');
+insert into rules (ruletype,importance,description,value,unit) values ('state:battery:max',2,'max state of charge',18,'kWh');
+insert into rules (ruletype,importance,description,value,unit) values ('consumption:battery:max',2,'max power',5,'kW');
+insert into rules (ruletype,importance,description,value,unit) values ('consumption:heatpump:max',1,'max power consumption',7,'kW');
+insert into rules (ruletype,importance,description,value,unit) values ('consumption:heatpump:min',1,'min steady state power consumption',7,'kW');
+insert into rules (ruletype,importance,description,value,unit) values ('consumption:charger:max',2,'max power consumption',11,'kW');
+insert into rules (ruletype,importance,description,value,unit) values ('consumption:charger:min',2,'min power consumption',7,'kW');
+insert into rules (ruletype,importance,description,value,unit) values ('state:house:min',1,'min temp at home',15,'C');
+insert into rules (ruletype,importance,description,value,unit) values ('state:house:max',1,'min temp at home',20,'C');
+insert into rules (ruletype,importance,description,value,unit) values ('people:presense:min',2,'movement at home',5,'%');
+
+CREATE TABLE rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ruletype VARCHAR(25) NOT NULL,
+    importance integer NOT NULL,
+    description VARCHAR(255) NOT NULL,
+    value INTEGER NOT NULL,
+    unit VARCHAR(10) NOT NULL,
+    startdate VARCHAR(25),
+    enddate VARCHAR(25),
+    starttime varchar(25),
+    endtime varchar(25),
+    status INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE metarules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rulename VARCHAR(25) NOT NULL,
+    ruletype VARCHAR(25) NOT NULL,
+    importance integer NOT NULL,
+    description VARCHAR(255) NOT NULL,
+    unit VARCHAR(10) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+
+insert into metarules (rulename,ruletype,importance,description,unit) values ('sufficient power','grid',0,'Verify rest power available','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('charge battery 1','battery',0,'Charge battery between min and max energy','kWh');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('charge battery 2','battery',0,'Battery between min and max power','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('can charge battery','grid|battery',0,'Safe power','kW');
+
+=====================
+=====================
+explain the sqlite view that joins decisions. i don't understand this?
+=====================
+yes implement both views
+=====================
+
+don't add the third view, but make one single program that includes the first two views
+=====================
+show the column names when displaying the views
+=====================
+
