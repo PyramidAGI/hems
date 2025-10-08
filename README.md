@@ -20,5 +20,5 @@ View the explanation table (with meta-rule flags):
 
 python hems_with_views.py --show-explain
 
-
-
+Tip:
+You can use an Sqlite inspection tool like https://sqlite.org/fiddle/index.html to inspect hems.db
