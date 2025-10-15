@@ -84,7 +84,7 @@ SEED_RULES = [
     ("consumption:charger:min",2,"min power consumption",7,"kW"),
     ("state:house:min",1,"min temp at home",15,"C"),
     ("state:house:max",1,"min temp at home",20,"C"),
-    ("people:presense:min",2,"movement at home",5,"%"),
+    ("people:presence:min",2,"movement at home",5,"%"),
 ]
 
 SEED_METARULES = [
@@ -159,50 +159,210 @@ def load_rules(conn: sqlite3.Connection) -> Dict[str, Tuple[int, int, str]]:
         out[row[0]] = (row[1], row[2], row[3])
     return out
 
-# ---------- Policy / Control ----------
+# ---------- Rule-based Policy / Control ----------
+from abc import ABC, abstractmethod
+from typing import List, Any
+
+class RuleEvaluator(ABC):
+    """Base class for rule evaluators that handle specific units and constraints"""
+    
+    def __init__(self, name: str, priority: int = 0):
+        self.name = name
+        self.priority = priority
+        
+    @abstractmethod
+    def evaluate(self, measurements: Measurements, current_setpoints: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        """Evaluate this rule and return modified setpoints"""
+        pass
+        
+    def get_rule_value(self, rules: Dict[str, Tuple[int,int,str]], key: str, default: float) -> float:
+        return rules.get(key, (default, 0, ""))[0]
+
+class PowerLimitEvaluator(RuleEvaluator):
+    """Evaluates power limits in kW units"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        grid_limit_kw = self.get_rule_value(rules, "grid:connection", 17)
+        hp_max_kw = self.get_rule_value(rules, "consumption:heatpump:max", 7)
+        chg_max_kw = self.get_rule_value(rules, "consumption:charger:max", 11)
+        batt_pmax_kw = self.get_rule_value(rules, "consumption:battery:max", 5)
+        
+        # Enforce power limits
+        sp.heatpump_kw = min(sp.heatpump_kw, hp_max_kw)
+        sp.charger_kw = min(sp.charger_kw, chg_max_kw)
+        sp.battery_charge_kw = max(-batt_pmax_kw, min(batt_pmax_kw, sp.battery_charge_kw))
+        sp.net_grid_kw = min(sp.net_grid_kw, grid_limit_kw)
+        
+        return sp
+
+class EnergyConstraintEvaluator(RuleEvaluator):
+    """Evaluates energy constraints in kWh units"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        batt_min_kwh = self.get_rule_value(rules, "state:battery:min", 0)
+        batt_max_kwh = self.get_rule_value(rules, "state:battery:max", 18)
+        batt_pmax_kw = self.get_rule_value(rules, "consumption:battery:max", 5)
+        
+        # Calculate energy limits for this time step
+        room_to_max_kwh = max(0.0, batt_max_kwh - m.battery_energy_kwh)
+        above_min_kwh = max(0.0, m.battery_energy_kwh - batt_min_kwh)
+        
+        # Limit battery charging based on available capacity
+        if sp.battery_charge_kw > 0:  # Charging
+            max_charge_kw = min(batt_pmax_kw, room_to_max_kwh / m.step_hours)
+            sp.battery_charge_kw = min(sp.battery_charge_kw, max_charge_kw)
+        elif sp.battery_charge_kw < 0:  # Discharging
+            max_discharge_kw = min(batt_pmax_kw, above_min_kwh / m.step_hours)
+            sp.battery_charge_kw = max(sp.battery_charge_kw, -max_discharge_kw)
+            
+        return sp
+
+class TemperatureControlEvaluator(RuleEvaluator):
+    """Evaluates temperature control rules in Celsius"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        house_min_c = self.get_rule_value(rules, "state:house:min", 15)
+        house_max_c = self.get_rule_value(rules, "state:house:max", 20)
+        hp_min_kw = self.get_rule_value(rules, "consumption:heatpump:min", 7)  # From seed data
+        hp_max_kw = self.get_rule_value(rules, "consumption:heatpump:max", 7)
+        
+        # Determine heating need based on temperature and presence
+        if m.needs_heating and m.house_temp_c < house_min_c:
+            # Use minimum steady state power for heating
+            sp.heatpump_kw = max(sp.heatpump_kw, hp_min_kw)
+        elif m.house_temp_c > house_max_c:
+            sp.heatpump_kw = 0.0  # No heating when too warm
+            
+        return sp
+
+class GridBalanceEvaluator(RuleEvaluator):
+    """Evaluates grid balance and manages load distribution"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        grid_limit_kw = self.get_rule_value(rules, "grid:connection", 17)
+        batt_pmax_kw = self.get_rule_value(rules, "consumption:battery:max", 5)
+        
+        # Calculate current grid load
+        current_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.charger_kw + sp.battery_charge_kw
+        
+        # If exceeding grid limit, discharge battery to compensate
+        if current_grid_kw > grid_limit_kw:
+            deficit = current_grid_kw - grid_limit_kw
+            battery_discharge = min(deficit, batt_pmax_kw)
+            sp.battery_charge_kw -= battery_discharge
+            
+        # Update net grid calculation
+        sp.net_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.charger_kw + sp.battery_charge_kw
+        
+        return sp
+
+class SolarOptimizationEvaluator(RuleEvaluator):
+    """Evaluates solar energy optimization rules"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        solar_min_kw = self.get_rule_value(rules, "production:solar:min", 0)
+        grid_limit_kw = self.get_rule_value(rules, "grid:connection", 17)
+        batt_max_kwh = self.get_rule_value(rules, "state:battery:max", 18)
+        batt_pmax_kw = self.get_rule_value(rules, "consumption:battery:max", 5)
+        
+        # If sufficient solar and battery has room, prioritize battery charging
+        if m.solar_kw >= solar_min_kw and m.battery_energy_kwh < batt_max_kwh:
+            current_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.charger_kw
+            headroom = grid_limit_kw - current_grid_kw
+            
+            if headroom > 0:
+                room_to_max_kwh = max(0.0, batt_max_kwh - m.battery_energy_kwh)
+                max_charge = min(batt_pmax_kw, room_to_max_kwh / m.step_hours, headroom)
+                sp.battery_charge_kw = max(sp.battery_charge_kw, max_charge)
+                
+        return sp
+
+class ChargerPriorityEvaluator(RuleEvaluator):
+    """Evaluates EV charger priority and minimum power rules"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        chg_min_kw = self.get_rule_value(rules, "consumption:charger:min", 0)
+        chg_max_kw = self.get_rule_value(rules, "consumption:charger:max", 11)
+        grid_limit_kw = self.get_rule_value(rules, "grid:connection", 17)
+        
+        # Calculate available power for charging
+        current_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.battery_charge_kw
+        available_power = grid_limit_kw - current_grid_kw
+        
+        # Determine charger allocation
+        desired = min(m.desired_charger_kw, chg_max_kw)
+        alloc = min(desired, available_power)
+        
+        # Only allocate if we can meet minimum or desired power
+        if alloc >= min(chg_min_kw, desired):
+            sp.charger_kw = alloc
+        else:
+            sp.charger_kw = 0.0
+            
+        return sp
+
 class HEMSController:
     def __init__(self, rules: Dict[str, Tuple[int,int,str]]):
         self.rules = rules
-        self.grid_limit_kw = float(self._get("grid:connection", 17))
-        self.solar_min_kw  = float(self._get("production:solar:min", 0))
-        self.house_min_c   = float(self._get("state:house:min", 15))
-        self.house_max_c   = float(self._get("state:house:max", 20))
-        self.batt_min_kwh  = float(self._get("state:battery:min", 0))
-        self.batt_max_kwh  = float(self._get("state:battery:max", 18))
-        self.batt_pmax_kw  = float(self._get("consumption:battery:max", 5))
-        self.hp_min_kw     = float(self._get("consumption:heatpump:min", 0))
-        self.hp_max_kw     = float(self._get("consumption:heatpump:max", 7))
-        self.chg_min_kw    = float(self._get("consumption:charger:min", 0))
-        self.chg_max_kw    = float(self._get("consumption:charger:max", 11))
-
-    def _get(self, key: str, default: float) -> float:
-        return self.rules.get(key, (default, 0, ""))[0]
+        self.evaluators: List[RuleEvaluator] = [
+            TemperatureControlEvaluator("temperature_control", priority=1),
+            PowerLimitEvaluator("power_limits", priority=2),
+            EnergyConstraintEvaluator("energy_constraints", priority=3),
+            SolarOptimizationEvaluator("solar_optimization", priority=4),
+            ChargerPriorityEvaluator("charger_priority", priority=5),
+            GridBalanceEvaluator("grid_balance", priority=6),
+        ]
+        # Sort evaluators by priority
+        self.evaluators.sort(key=lambda x: x.priority)
 
     def decide(self, m: Measurements) -> Setpoints:
-        def room_to_max_kwh() -> float: return max(0.0, self.batt_max_kwh - m.battery_energy_kwh)
-        def above_min_kwh() -> float:   return max(0.0, m.battery_energy_kwh - self.batt_min_kwh)
-        hp_kw = ch_kw = batt_kw = 0.0
-        net_grid_kw = m.base_load_kw - m.solar_kw
-        if m.needs_heating and m.house_temp_c < self.house_min_c:
-            hp_kw = min(self.hp_max_kw, self.hp_min_kw)
-        net_grid_kw += hp_kw
-        if net_grid_kw > self.grid_limit_kw:
-            deficit = net_grid_kw - self.grid_limit_kw
-            d = min(deficit, self.batt_pmax_kw, above_min_kwh()/m.step_hours)
-            batt_kw -= d; net_grid_kw -= d
-        headroom = self.grid_limit_kw - net_grid_kw
-        if headroom > 0 and m.solar_kw >= self.solar_min_kw and room_to_max_kwh() > 0:
-            c = min(self.batt_pmax_kw, room_to_max_kwh()/m.step_hours, headroom)
-            batt_kw += c; net_grid_kw += c; headroom -= c
-        desired = min(m.desired_charger_kw, self.chg_max_kw)
-        alloc = min(desired, headroom)
-        if alloc >= min(self.chg_min_kw, desired):
-            ch_kw = alloc; net_grid_kw += ch_kw
-        if net_grid_kw > self.grid_limit_kw + 1e-6:
-            deficit = net_grid_kw - self.grid_limit_kw
-            d = min(deficit, self.batt_pmax_kw + max(0.0, -batt_kw), above_min_kwh()/m.step_hours)
-            batt_kw -= d; net_grid_kw -= d
-        return Setpoints(round(hp_kw,3), round(ch_kw,3), round(batt_kw,3), round(net_grid_kw,3))
+        # Initialize setpoints
+        sp = Setpoints(heatpump_kw=0.0, charger_kw=0.0, battery_charge_kw=0.0, net_grid_kw=0.0)
+        
+        # Apply each rule evaluator in priority order
+        for evaluator in self.evaluators:
+            sp = evaluator.evaluate(m, sp, self.rules)
+        
+        # Round final values
+        sp.heatpump_kw = round(sp.heatpump_kw, 3)
+        sp.charger_kw = round(sp.charger_kw, 3)
+        sp.battery_charge_kw = round(sp.battery_charge_kw, 3)
+        sp.net_grid_kw = round(sp.net_grid_kw, 3)
+        
+        return sp
+    
+    def decide_with_trace(self, m: Measurements) -> Tuple[Setpoints, List[str]]:
+        """Decision with evaluation trace for debugging"""
+        trace = []
+        sp = Setpoints(heatpump_kw=0.0, charger_kw=0.0, battery_charge_kw=0.0, net_grid_kw=0.0)
+        trace.append(f"Initial: HP={sp.heatpump_kw:.3f}, CH={sp.charger_kw:.3f}, BAT={sp.battery_charge_kw:.3f}, GRID={sp.net_grid_kw:.3f}")
+        
+        for evaluator in self.evaluators:
+            sp_before = Setpoints(sp.heatpump_kw, sp.charger_kw, sp.battery_charge_kw, sp.net_grid_kw)
+            sp = evaluator.evaluate(m, sp, self.rules)
+            
+            changes = []
+            if abs(sp.heatpump_kw - sp_before.heatpump_kw) > 1e-6:
+                changes.append(f"HP: {sp_before.heatpump_kw:.3f}→{sp.heatpump_kw:.3f}")
+            if abs(sp.charger_kw - sp_before.charger_kw) > 1e-6:
+                changes.append(f"CH: {sp_before.charger_kw:.3f}→{sp.charger_kw:.3f}")
+            if abs(sp.battery_charge_kw - sp_before.battery_charge_kw) > 1e-6:
+                changes.append(f"BAT: {sp_before.battery_charge_kw:.3f}→{sp.battery_charge_kw:.3f}")
+            if abs(sp.net_grid_kw - sp_before.net_grid_kw) > 1e-6:
+                changes.append(f"GRID: {sp_before.net_grid_kw:.3f}→{sp.net_grid_kw:.3f}")
+                
+            if changes:
+                trace.append(f"{evaluator.name}: {', '.join(changes)}")
+            else:
+                trace.append(f"{evaluator.name}: no changes")
+        
+        # Round final values
+        sp.heatpump_kw = round(sp.heatpump_kw, 3)
+        sp.charger_kw = round(sp.charger_kw, 3)
+        sp.battery_charge_kw = round(sp.battery_charge_kw, 3)
+        sp.net_grid_kw = round(sp.net_grid_kw, 3)
+        
+        return sp, trace
 
 def log_decision(conn, m, sp):
     conn.execute("""INSERT INTO decisions (
@@ -231,6 +391,7 @@ def parse_args():
     p.add_argument("--print-rules", action="store_true")
     p.add_argument("--show-dwr", action="store_true")
     p.add_argument("--show-explain", action="store_true")
+    p.add_argument("--show-rules-eval", action="store_true", help="Show rule evaluation process")
     p.add_argument("--limit", type=int, default=5)
     return p.parse_args()
 
@@ -285,11 +446,20 @@ def main():
         m = interactive_measurements()
 
     controller = HEMSController(rules)
-    sp = controller.decide(m)
+    
+    if args.show_rules_eval:
+        sp, trace = controller.decide_with_trace(m)
+        print("\n=== Rule Evaluation Trace ===")
+        for line in trace:
+            print(line)
+    else:
+        sp = controller.decide(m)
+    
     log_decision(conn, m, sp)
 
     print("\n=== HEMS Decision ===")
-    print(f"Grid limit:        {controller.grid_limit_kw:.2f} kW")
+    grid_limit_kw = controller.evaluators[0].get_rule_value(rules, "grid:connection", 17)
+    print(f"Grid limit:        {grid_limit_kw:.2f} kW")
     print(f"Net grid:          {sp.net_grid_kw:.2f} kW")
     print(f"Heat pump:         {sp.heatpump_kw:.2f} kW")
     print(f"EV charger:        {sp.charger_kw:.2f} kW")
