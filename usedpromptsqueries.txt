@@ -81,4 +81,31 @@ insert into metarules (rulename,ruletype,importance,description,unit) values ('h
 insert into metarules (rulename,ruletype,importance,description,unit) values ('can heat home','grid && heatpump',1,'Signal heatpump that the house must be heated','C && kW');
 insert into metarules (rulename,ruletype,importance,description,unit) values ('optimize self consumption','grid && battery',0,'Try to balance production and consumption','kW');
 
-//dit is een change
+=======================
+Summary of Changes
+1. Rule-Based Architecture
+Replaced the monolithic decide() function with a collection of specialized rule evaluators
+Each evaluator handles specific units and constraints (kW, kWh, °C, etc.)
+2. Unit-Specific Evaluators
+PowerLimitEvaluator: Enforces maximum power constraints (kW limits)
+EnergyConstraintEvaluator: Manages battery energy limits (kWh constraints)
+TemperatureControlEvaluator: Handles heating/cooling logic (°C evaluation)
+SolarOptimizationEvaluator: Optimizes solar energy utilization
+ChargerPriorityEvaluator: Manages EV charging allocation
+GridBalanceEvaluator: Enforces grid connection limits
+3. Priority-Based Execution
+Rules execute in order of priority (1-6)
+Each rule can modify the setpoints based on its specific domain
+Later rules can override earlier decisions if needed
+4. Debugging & Traceability
+Added --show-rules-eval CLI option to see how each rule affects the decision
+decide_with_trace() method shows the step-by-step evaluation process
+Each rule change is logged with before/after values
+5. Example Usage
+6. Benefits of This Approach
+Modularity: Each rule is self-contained and testable
+Extensibility: Easy to add new rules or modify existing ones
+Unit Safety: Each evaluator knows how to handle its specific units (kW vs kWh vs °C)
+Transparency: Clear trace of which rules made which decisions
+Maintainability: Logic is separated by concern/domain
+The system now operates as a true rule-based engine where each rule evaluator can inspect the current state and make adjustments according to its specific domain expertise!
