@@ -1,1 +1,0 @@
-SELECT type, name FROM sqlite_schema WHERE type IN ('table', 'view') ORDER BY type, name;
