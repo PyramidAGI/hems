@@ -600,7 +600,7 @@ if FLASK_AVAILABLE:
     # Loadpoint endpoints
     @app.route('/api/loadpoints/<int:lp_id>/mode/<mode>', methods=['POST'])
     def set_loadpoint_mode(lp_id: int, mode: str):
-        """Set loadpoint charging mode"""
+        """Set loadpoint charging mode with optional parameters"""
         lp = get_loadpoint(lp_id)
         if not lp:
             return error_response(f"Loadpoint {lp_id} not found", 404)
@@ -609,10 +609,43 @@ if FLASK_AVAILABLE:
         if mode not in valid_modes:
             return error_response(f"Invalid mode. Must be one of: {valid_modes}")
         
+        # Get optional parameters from request body
+        data = request.get_json() if request.is_json else {}
+        priority = data.get('priority', None)
+        enable_threshold = data.get('enable_threshold', None)
+        disable_threshold = data.get('disable_threshold', None)
+        
         with hems_state._lock:
             lp.mode = mode
+            
+            # Apply optional parameters if provided
+            if priority is not None:
+                if isinstance(priority, int) and priority >= 0:
+                    lp.priority = priority
+                else:
+                    return error_response("Priority must be a non-negative integer")
+            
+            if enable_threshold is not None:
+                if isinstance(enable_threshold, (int, float)):
+                    lp.enable_threshold = float(enable_threshold)
+                else:
+                    return error_response("Enable threshold must be a number (watts)")
+            
+            if disable_threshold is not None:
+                if isinstance(disable_threshold, (int, float)):
+                    lp.disable_threshold = float(disable_threshold)
+                else:
+                    return error_response("Disable threshold must be a number (watts)")
         
-        return success_response({"mode": mode})
+        # Return the updated loadpoint configuration
+        response_data = {
+            "mode": mode,
+            "priority": lp.priority,
+            "enable_threshold": lp.enable_threshold,
+            "disable_threshold": lp.disable_threshold
+        }
+        
+        return success_response(response_data)
 
     @app.route('/api/loadpoints/<int:lp_id>/phases/<int:phases>', methods=['POST'])
     def set_loadpoint_phases(lp_id: int, phases: int):
