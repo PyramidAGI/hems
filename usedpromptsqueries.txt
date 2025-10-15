@@ -80,3 +80,5 @@ insert into metarules (rulename,ruletype,importance,description,unit) values ('c
 insert into metarules (rulename,ruletype,importance,description,unit) values ('home temperature','home',1,'Maintain temperature in right range','C');
 insert into metarules (rulename,ruletype,importance,description,unit) values ('can heat home','grid && heatpump',1,'Signal heatpump that the house must be heated','C && kW');
 insert into metarules (rulename,ruletype,importance,description,unit) values ('optimize self consumption','grid && battery',0,'Try to balance production and consumption','kW');
+
+//dit is een change
