@@ -54,4 +54,21 @@ don't add the third view, but make one single program that includes the first tw
 =====================
 show the column names when displaying the views
 =====================
-
+insert statements run on : 15-10-2025:
+insert into metarules (rulename,ruletype,importance,description,unit) values ('Safe power','grid',0,'Verify grid connection is not overloaded','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('charge battery 1','battery',3,'Charge battery between min and max energy','kWh');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('can charge battery','grid && battery',3,'Verify power available','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('charge car 1','charger',2,'Charge car between min and max energy','kWh');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('can charge car','grid && charger',2,'Verify power available','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('home temperature','home',1,'Maintain temperature in right range','C');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('can heat home','grid && heatpump',1,'Signal heatpump that the house must be heated','C && kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('optimize self consumption','grid && battery',0,'Try to balance production and consumption','kW');
+=====================
+insert into metarules (rulename,ruletype,importance,description,unit) values ('Safe power','grid',0,'Verify grid connection is not overloaded','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('charge battery 1','battery',3,'Charge battery between min and max energy','kWh');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('can charge battery','grid && battery',3,'Verify power available','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('charge car 1','charger',2,'Charge car between min and max energy','kWh');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('can charge car','grid && charger',2,'Verify power available','kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('home temperature','home',1,'Maintain temperature in right range','C');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('can heat home','grid && heatpump',1,'Signal heatpump that the house must be heated','C && kW');
+insert into metarules (rulename,ruletype,importance,description,unit) values ('optimize self consumption','grid && battery',0,'Try to balance production and consumption','kW');
