@@ -84,7 +84,7 @@ SEED_RULES = [
     ("consumption:charger:min",2,"min power consumption",7,"kW"),
     ("state:house:min",1,"min temp at home",15,"C"),
     ("state:house:max",1,"min temp at home",20,"C"),
-    ("people:presense:min",2,"movement at home",5,"%"),
+    ("people:presence:min",2,"movement at home",5,"%"),
 ]
 
 SEED_METARULES = [
@@ -159,8 +159,200 @@ def load_rules(conn: sqlite3.Connection) -> Dict[str, Tuple[int, int, str]]:
         out[row[0]] = (row[1], row[2], row[3])
     return out
 
-# ---------- Policy / Control ----------
+def load_metarules(conn: sqlite3.Connection) -> Dict[str, Tuple[str, int, str, str]]:
+    """Load metarules: rulename -> (ruletype, importance, description, unit)"""
+    out: Dict[str, Tuple[str, int, str, str]] = {}
+    for row in conn.execute("SELECT rulename, ruletype, importance, description, unit FROM metarules"):
+        out[row[0]] = (row[1], row[2], row[3], row[4])
+    return out
+
+# ---------- Rule-based Policy / Control ----------
+from abc import ABC, abstractmethod
+from typing import List, Any
+
+class RuleEvaluator(ABC):
+    """Base class for rule evaluators that handle specific metarule logic"""
+    
+    def __init__(self, metarule_name: str):
+        self.metarule_name = metarule_name
+        
+    @abstractmethod
+    def evaluate(self, measurements: Measurements, current_setpoints: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        """Evaluate this rule and return modified setpoints"""
+        pass
+        
+    def get_rule_value(self, rules: Dict[str, Tuple[int,int,str]], key: str, default: float) -> float:
+        return rules.get(key, (default, 0, ""))[0]
+
+class SufficientPowerEvaluator(RuleEvaluator):
+    """Implements 'sufficient power' metarule - verify rest power available"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        grid_limit_kw = self.get_rule_value(rules, "grid:connection", 17)
+        
+        # Calculate current grid usage
+        current_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.charger_kw + sp.battery_charge_kw
+        
+        # If exceeding grid limit, reduce battery charging or increase discharging
+        if current_grid_kw > grid_limit_kw:
+            batt_pmax_kw = self.get_rule_value(rules, "consumption:battery:max", 5)
+            deficit = current_grid_kw - grid_limit_kw
+            battery_adjustment = min(deficit, batt_pmax_kw)
+            sp.battery_charge_kw -= battery_adjustment
+            
+        # Update net grid calculation
+        sp.net_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.charger_kw + sp.battery_charge_kw
+        return sp
+
+class ChargeBattery1Evaluator(RuleEvaluator):
+    """Implements 'charge battery 1' metarule - charge battery between min and max energy"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        batt_min_kwh = self.get_rule_value(rules, "state:battery:min", 0)
+        batt_max_kwh = self.get_rule_value(rules, "state:battery:max", 18)
+        batt_pmax_kw = self.get_rule_value(rules, "consumption:battery:max", 5)
+        solar_min_kw = self.get_rule_value(rules, "production:solar:min", 2)
+        grid_limit_kw = self.get_rule_value(rules, "grid:connection", 17)
+        
+        # Only charge if we have sufficient solar and battery has room
+        if m.solar_kw >= solar_min_kw and m.battery_energy_kwh < batt_max_kwh:
+            current_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.charger_kw
+            available_power = grid_limit_kw - current_grid_kw
+            
+            if available_power > 0:
+                room_to_max_kwh = max(0.0, batt_max_kwh - m.battery_energy_kwh)
+                max_charge_kw = min(batt_pmax_kw, room_to_max_kwh / m.step_hours, available_power)
+                sp.battery_charge_kw = max(sp.battery_charge_kw, max_charge_kw)
+                
+        return sp
+
+class ChargeBattery2Evaluator(RuleEvaluator):
+    """Implements 'charge battery 2' metarule - battery between min and max power"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        batt_min_kwh = self.get_rule_value(rules, "state:battery:min", 0)
+        batt_pmax_kw = self.get_rule_value(rules, "consumption:battery:max", 5)
+        
+        # Enforce power limits
+        sp.battery_charge_kw = max(-batt_pmax_kw, min(batt_pmax_kw, sp.battery_charge_kw))
+        
+        # Ensure we don't discharge below minimum energy
+        if sp.battery_charge_kw < 0:  # Discharging
+            above_min_kwh = max(0.0, m.battery_energy_kwh - batt_min_kwh)
+            max_discharge_kw = min(batt_pmax_kw, above_min_kwh / m.step_hours)
+            sp.battery_charge_kw = max(sp.battery_charge_kw, -max_discharge_kw)
+            
+        return sp
+
+class CanChargeBatteryEvaluator(RuleEvaluator):
+    """Implements 'can charge battery' metarule - safe power management"""
+    
+    def evaluate(self, m: Measurements, sp: Setpoints, rules: Dict[str, Tuple[int,int,str]]) -> Setpoints:
+        grid_limit_kw = self.get_rule_value(rules, "grid:connection", 17)
+        batt_max_kwh = self.get_rule_value(rules, "state:battery:max", 18)
+        house_min_c = self.get_rule_value(rules, "state:house:min", 15)
+        hp_min_kw = self.get_rule_value(rules, "consumption:heatpump:min", 7)
+        chg_min_kw = self.get_rule_value(rules, "consumption:charger:min", 7)
+        chg_max_kw = self.get_rule_value(rules, "consumption:charger:max", 11)
+        
+        # Handle heating priority
+        if m.needs_heating and m.house_temp_c < house_min_c:
+            sp.heatpump_kw = max(sp.heatpump_kw, hp_min_kw)
+            
+        # Handle EV charging with available power
+        current_grid_kw = m.base_load_kw - m.solar_kw + sp.heatpump_kw + sp.battery_charge_kw
+        available_power = grid_limit_kw - current_grid_kw
+        
+        if available_power > 0:
+            desired = min(m.desired_charger_kw, chg_max_kw)
+            alloc = min(desired, available_power)
+            
+            # Only allocate if we can meet minimum or desired power
+            if alloc >= min(chg_min_kw, desired):
+                sp.charger_kw = alloc
+            else:
+                sp.charger_kw = 0.0
+        else:
+            sp.charger_kw = 0.0
+            
+        return sp
+
 class HEMSController:
+    def __init__(self, rules: Dict[str, Tuple[int,int,str]], metarules: Dict[str, Tuple[str, int, str, str]]):
+        self.rules = rules
+        self.metarules = metarules
+        
+        # Create evaluators based on metarules
+        self.evaluators: List[Tuple[int, RuleEvaluator]] = []
+        
+        for metarule_name, (ruletype, importance, description, unit) in metarules.items():
+            if metarule_name == "sufficient power":
+                evaluator = SufficientPowerEvaluator(metarule_name)
+            elif metarule_name == "charge battery 1":
+                evaluator = ChargeBattery1Evaluator(metarule_name)
+            elif metarule_name == "charge battery 2":
+                evaluator = ChargeBattery2Evaluator(metarule_name)
+            elif metarule_name == "can charge battery":
+                evaluator = CanChargeBatteryEvaluator(metarule_name)
+            else:
+                continue  # Skip unknown metarules
+                
+            self.evaluators.append((importance, evaluator))
+        
+        # Sort by importance (lower number = higher priority)
+        self.evaluators.sort(key=lambda x: x[0])
+
+    def decide(self, m: Measurements) -> Setpoints:
+        # Initialize setpoints
+        sp = Setpoints(heatpump_kw=0.0, charger_kw=0.0, battery_charge_kw=0.0, net_grid_kw=0.0)
+        
+        # Apply each metarule evaluator in priority order
+        for importance, evaluator in self.evaluators:
+            sp = evaluator.evaluate(m, sp, self.rules)
+        
+        # Round final values
+        sp.heatpump_kw = round(sp.heatpump_kw, 3)
+        sp.charger_kw = round(sp.charger_kw, 3)
+        sp.battery_charge_kw = round(sp.battery_charge_kw, 3)
+        sp.net_grid_kw = round(sp.net_grid_kw, 3)
+        
+        return sp
+    
+    def decide_with_trace(self, m: Measurements) -> Tuple[Setpoints, List[str]]:
+        """Decision with evaluation trace for debugging"""
+        trace = []
+        sp = Setpoints(heatpump_kw=0.0, charger_kw=0.0, battery_charge_kw=0.0, net_grid_kw=0.0)
+        trace.append(f"Initial: HP={sp.heatpump_kw:.3f}, CH={sp.charger_kw:.3f}, BAT={sp.battery_charge_kw:.3f}, GRID={sp.net_grid_kw:.3f}")
+        
+        for importance, evaluator in self.evaluators:
+            sp_before = Setpoints(sp.heatpump_kw, sp.charger_kw, sp.battery_charge_kw, sp.net_grid_kw)
+            sp = evaluator.evaluate(m, sp, self.rules)
+            
+            changes = []
+            if abs(sp.heatpump_kw - sp_before.heatpump_kw) > 1e-6:
+                changes.append(f"HP: {sp_before.heatpump_kw:.3f}→{sp.heatpump_kw:.3f}")
+            if abs(sp.charger_kw - sp_before.charger_kw) > 1e-6:
+                changes.append(f"CH: {sp_before.charger_kw:.3f}→{sp.charger_kw:.3f}")
+            if abs(sp.battery_charge_kw - sp_before.battery_charge_kw) > 1e-6:
+                changes.append(f"BAT: {sp_before.battery_charge_kw:.3f}→{sp.battery_charge_kw:.3f}")
+            if abs(sp.net_grid_kw - sp_before.net_grid_kw) > 1e-6:
+                changes.append(f"GRID: {sp_before.net_grid_kw:.3f}→{sp.net_grid_kw:.3f}")
+                
+            if changes:
+                trace.append(f"{evaluator.metarule_name} (importance={importance}): {', '.join(changes)}")
+            else:
+                trace.append(f"{evaluator.metarule_name} (importance={importance}): no changes")
+        
+        # Round final values
+        sp.heatpump_kw = round(sp.heatpump_kw, 3)
+        sp.charger_kw = round(sp.charger_kw, 3)
+        sp.battery_charge_kw = round(sp.battery_charge_kw, 3)
+        sp.net_grid_kw = round(sp.net_grid_kw, 3)
+        
+        return sp, trace
+
+# Legacy controller for compatibility
+class LegacyHEMSController:
     def __init__(self, rules: Dict[str, Tuple[int,int,str]]):
         self.rules = rules
         self.grid_limit_kw = float(self._get("grid:connection", 17))
@@ -231,6 +423,8 @@ def parse_args():
     p.add_argument("--print-rules", action="store_true")
     p.add_argument("--show-dwr", action="store_true")
     p.add_argument("--show-explain", action="store_true")
+    p.add_argument("--show-metarules-eval", action="store_true", help="Show metarule evaluation process")
+    p.add_argument("--use-legacy", action="store_true", help="Use legacy monolithic controller")
     p.add_argument("--limit", type=int, default=5)
     return p.parse_args()
 
@@ -267,6 +461,9 @@ def main():
         print("Loaded rules:")
         for k,(v,imp,u) in sorted(load_rules(conn).items()):
             print(f"{k:25} {v} {u} (importance {imp})")
+        print("\nLoaded metarules:")
+        for k,(rt,imp,desc,u) in sorted(load_metarules(conn).items()):
+            print(f"{k:25} {rt} {u} (importance {imp}) - {desc}")
         return
     if args.show_dwr:
         print_query_with_headers(conn, f"SELECT * FROM decision_with_rules ORDER BY decided_at DESC LIMIT {args.limit}")
@@ -277,6 +474,8 @@ def main():
 
     # normal decision
     rules = load_rules(conn)
+    metarules = load_metarules(conn)
+    
     if all(getattr(args, x) is not None for x in ["base_load","solar","temp","battery","presence","ev"]):
         m = Measurements(args.base_load, args.solar, args.temp, args.battery,
                          args.presence, args.ev, args.needs_heating, args.step_hours)
@@ -284,12 +483,27 @@ def main():
         print("Interactive mode:")
         m = interactive_measurements()
 
-    controller = HEMSController(rules)
-    sp = controller.decide(m)
+    # Choose controller based on arguments
+    if args.use_legacy:
+        controller = LegacyHEMSController(rules)
+        sp = controller.decide(m)
+        print("Using legacy monolithic controller")
+    else:
+        controller = HEMSController(rules, metarules)
+        if args.show_metarules_eval:
+            sp, trace = controller.decide_with_trace(m)
+            print("\n=== Metarule Evaluation Trace ===")
+            for line in trace:
+                print(line)
+        else:
+            sp = controller.decide(m)
+        print("Using metarule-based controller")
+    
     log_decision(conn, m, sp)
 
     print("\n=== HEMS Decision ===")
-    print(f"Grid limit:        {controller.grid_limit_kw:.2f} kW")
+    grid_limit_kw = rules.get("grid:connection", (17, 0, ""))[0]
+    print(f"Grid limit:        {grid_limit_kw:.2f} kW")
     print(f"Net grid:          {sp.net_grid_kw:.2f} kW")
     print(f"Heat pump:         {sp.heatpump_kw:.2f} kW")
     print(f"EV charger:        {sp.charger_kw:.2f} kW")
