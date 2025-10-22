@@ -4,7 +4,13 @@ import sqlite3
 import argparse
 import datetime as dt
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
+
+try:
+    import requests
+except ImportError:
+    print("Error: 'requests' library not found. Please install it using 'pip install requests'")
+    requests = None
 
 DB_PATH = "hems.db"
 
@@ -417,7 +423,7 @@ def parse_args():
     p.add_argument("--temp", type=float)
     p.add_argument("--battery", type=float)
     p.add_argument("--presence", type=float)
-    p.add_argument("--ev", type=float)
+    p.add_argument("--evcc-api", type=str, help="Base URL of the EVCC API (e.g., http://localhost:7070)")
     p.add_argument("--needs-heating", action="store_true")
     p.add_argument("--step-hours", type=float, default=1.0)
     p.add_argument("--print-rules", action="store_true")
@@ -437,17 +443,34 @@ def print_query_with_headers(conn, query):
     for r in rows:
         print(" | ".join(str(x) for x in r))
 
-def interactive_measurements() -> Measurements:
+def get_evcc_state(api_url: str) -> Optional[Dict]:
+    """Fetches the current state from the EVCC API"""
+    if not requests:
+        print("EVCC API call skipped: 'requests' library is not installed.")
+        return None
+    try:
+        response = requests.get(f"{api_url}/api/state")
+        response.raise_for_status()  # Raise an exception for bad status codes
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching data from EVCC API: {e}")
+        return None
+
+def interactive_measurements(evcc_state: Optional[Dict]) -> Measurements:
     def ask(p, c=float, d=None):
         s = input(f"{p}{' ['+str(d)+']' if d is not None else ''}: ").strip()
         return c(s) if s else d
+
+    # Use EVCC data if available, otherwise ask interactively
+    desired_charger_kw = evcc_state.get('loadpoints', [{}])[0].get('chargePower', 7.0) if evcc_state else 7.0
+    
     return Measurements(
         ask("Base load kW",float,1.5),
         ask("PV kW",float,3.0),
         ask("Indoor temp °C",float,18.0),
         ask("Battery energy kWh",float,10.0),
         ask("Presence %",float,80.0),
-        ask("Desired EV kW",float,7.0),
+        ask(f"Desired EV kW", float, desired_charger_kw),
         ask("Needs heating? (0/1)",int,1)==1,
         ask("Step hours",float,1.0)
     )
@@ -476,12 +499,28 @@ def main():
     rules = load_rules(conn)
     metarules = load_metarules(conn)
     
-    if all(getattr(args, x) is not None for x in ["base_load","solar","temp","battery","presence","ev"]):
+    # Fetch EVCC state if API URL is provided
+    evcc_state = None
+    if args.evcc_api:
+        evcc_state = get_evcc_state(args.evcc_api)
+        if evcc_state:
+            print("\nSuccessfully fetched data from EVCC API.")
+            # Optionally print some key values from the EVCC state
+            print(f"  EVCC Grid Power: {evcc_state.get('gridPower')} W")
+            print(f"  EVCC PV Power: {evcc_state.get('pvPower')} W")
+            print(f"  EVCC Battery SOC: {evcc_state.get('batterySoC')} %")
+            if evcc_state.get('loadpoints'):
+                print(f"  EVCC Loadpoint 1 Charge Power: {evcc_state['loadpoints'][0].get('chargePower')} W")
+
+    # Determine measurements
+    if all(getattr(args, x) is not None for x in ["base_load","solar","temp","battery","presence"]):
+        # Use EVCC data for desired charger kW if available, otherwise use --ev arg or default
+        desired_kw = evcc_state.get('loadpoints', [{}])[0].get('chargePower', 7.0) / 1000 if evcc_state else args.ev
         m = Measurements(args.base_load, args.solar, args.temp, args.battery,
-                         args.presence, args.ev, args.needs_heating, args.step_hours)
+                         args.presence, desired_kw, args.needs_heating, args.step_hours)
     else:
-        print("Interactive mode:")
-        m = interactive_measurements()
+        print("\nInteractive mode:")
+        m = interactive_measurements(evcc_state)
 
     # Choose controller based on arguments
     if args.use_legacy:
