@@ -23,3 +23,8 @@ decided_at | net_grid_kw | mr_sufficient_power_ok | mr_charge_battery_energy_ok 
 
 
 Now each view display automatically includes its column names for clear interpretation.
+
+-----------------
+pip install requests
+
+python hems_with_views.py --evcc-api http://localhost:7070
